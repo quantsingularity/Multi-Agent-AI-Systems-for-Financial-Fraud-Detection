@@ -1,12 +1,13 @@
 """
 Orchestrator coordinates all agents in the fraud detection pipeline.
 """
-import sys
-sys.path.append('..')
 
-from typing import Dict, List, Any
+import sys
+
+sys.path.append("..")
+
+from typing import Dict, Any
 import time
-import json
 from datetime import datetime
 import pandas as pd
 import numpy as np
@@ -14,8 +15,9 @@ import numpy as np
 from config import get_config
 from data.feature_engineering import FeatureEngineer
 from models.anomaly_detectors import (
-    IsolationForestDetector, XGBoostDetector, 
-    EnsembleDetector, evaluate_detector
+    IsolationForestDetector,
+    XGBoostDetector,
+    EnsembleDetector,
 )
 from agents.privacy_guard import PrivacyGuard
 from agents.llm_agents import EvidenceAggregator, NarrativeGenerator
@@ -23,94 +25,94 @@ from agents.llm_agents import EvidenceAggregator, NarrativeGenerator
 
 class FraudDetectionOrchestrator:
     """Coordinates multi-agent fraud detection pipeline."""
-    
+
     def __init__(self, config=None):
         self.config = config or get_config()
-        
+
         # Initialize agents
         self.feature_engineer = FeatureEngineer()
         self.privacy_guard = PrivacyGuard(self.config)
         self.evidence_aggregator = EvidenceAggregator(self.config)
         self.narrative_generator = NarrativeGenerator(self.config)
-        
+
         # Initialize detectors
         self.detectors = {
             "isolation_forest": IsolationForestDetector(self.config),
             "xgboost": XGBoostDetector(self.config),
-            "ensemble": EnsembleDetector(self.config)
+            "ensemble": EnsembleDetector(self.config),
         }
-        
+
         # Tracking
         self.detection_times = []
         self.case_reports = []
-        
+
     def train(self, train_df: pd.DataFrame):
         """Train all detectors on training data."""
         print("Training fraud detection models...")
-        
+
         # Feature engineering
         self.feature_engineer.fit(train_df)
         X_train = self.feature_engineer.transform(train_df)
-        y_train = train_df['is_fraud'].values
-        
+        y_train = train_df["is_fraud"].values
+
         # Train each detector
         for name, detector in self.detectors.items():
             print(f"  Training {name}...")
             start = time.time()
-            
+
             if name in ["xgboost", "ensemble"]:
                 detector.fit(X_train.values, y_train)
             else:
                 detector.fit(X_train.values)
-            
+
             elapsed = time.time() - start
             print(f"    Trained in {elapsed:.2f}s")
-        
+
         print("Training complete.\n")
-        
+
     def detect_single(self, transaction: Dict) -> Dict[str, Any]:
         """
         Process a single transaction through the detection pipeline.
-        
+
         Returns:
             Detection result with evidence and narrative
         """
         start_time = time.time()
-        
+
         # Step 1: Privacy Guard - redact PII
         redacted_tx = self.privacy_guard.redact_transaction(transaction)
-        
+
         # Step 2: Feature engineering
         tx_df = pd.DataFrame([redacted_tx])
         features = self.feature_engineer.transform(tx_df)
-        
+
         # Step 3: Run all detectors
         detector_scores = {}
         for name, detector in self.detectors.items():
             score = detector.predict_proba(features.values)[0]
             detector_scores[name] = float(score)
-        
+
         # Step 4: Evidence aggregation
         feature_dict = features.iloc[0].to_dict()
         evidence = self.evidence_aggregator.aggregate(
             redacted_tx, detector_scores, feature_dict
         )
-        
+
         # Step 5: Narrative generation (if flagged)
         narrative = None
         if evidence["fraud_score"] > 0.5:
             narrative = self.narrative_generator.generate_narrative(
                 evidence, redacted_tx
             )
-        
+
         # Step 6: Privacy Guard gates
         review_gate = self.privacy_guard.apply_investigator_review_gate(
             evidence["fraud_score"], evidence
         )
-        
+
         detection_time = time.time() - start_time
         self.detection_times.append(detection_time)
-        
+
         result = {
             "transaction_id": transaction["transaction_id"],
             "fraud_score": evidence["fraud_score"],
@@ -121,68 +123,73 @@ class FraudDetectionOrchestrator:
             "narrative": narrative,
             "review_required": review_gate["review_required"],
             "detection_time_ms": detection_time * 1000,
-            "processed_at": datetime.now().isoformat()
+            "processed_at": datetime.now().isoformat(),
         }
-        
+
         return result
-    
+
     def detect_batch(self, transactions_df: pd.DataFrame) -> pd.DataFrame:
         """
         Process batch of transactions.
-        
+
         Returns:
             DataFrame with detection results
         """
         print(f"Processing {len(transactions_df)} transactions...")
-        
+
         results = []
         for idx, row in transactions_df.iterrows():
             tx_dict = row.to_dict()
             result = self.detect_single(tx_dict)
             results.append(result)
-            
+
             if (idx + 1) % 1000 == 0:
                 print(f"  Processed {idx + 1}/{len(transactions_df)}")
-        
+
         results_df = pd.DataFrame(results)
         print(f"Batch processing complete.\n")
-        
+
         return results_df
-    
-    def evaluate(self, test_df: pd.DataFrame, results_df: pd.DataFrame) -> Dict[str, Any]:
+
+    def evaluate(
+        self, test_df: pd.DataFrame, results_df: pd.DataFrame
+    ) -> Dict[str, Any]:
         """
         Evaluate detection performance.
-        
+
         Returns:
             Metrics dictionary
         """
-        y_true = test_df['is_fraud'].values
-        y_pred = results_df['is_flagged'].values
-        y_scores = results_df['fraud_score'].values
-        
+        y_true = test_df["is_fraud"].values
+        y_pred = results_df["is_flagged"].values
+        y_scores = results_df["fraud_score"].values
+
         # Import metrics
         from sklearn.metrics import (
-            precision_recall_fscore_support, roc_auc_score, 
-            confusion_matrix, roc_curve, precision_recall_curve
+            precision_recall_fscore_support,
+            roc_auc_score,
+            confusion_matrix,
+            roc_curve,
+            precision_recall_curve,
         )
-        
+
         # Basic metrics
         precision, recall, f1, _ = precision_recall_fscore_support(
-            y_true, y_pred, average='binary', zero_division=0
+            y_true, y_pred, average="binary", zero_division=0
         )
-        
+
         auc_roc = roc_auc_score(y_true, y_scores)
-        
+
         # Confusion matrix
         tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
-        
+
         # Detection latency stats
-        detection_times = results_df['detection_time_ms'].values
-        
+        detection_times = results_df["detection_time_ms"].values
+
         # Curves
         fpr, tpr, _ = roc_curve(y_true, y_scores)
         prec_curve, rec_curve, _ = precision_recall_curve(y_true, y_scores)
-        
+
         metrics = {
             "precision": float(precision),
             "recall": float(recall),
@@ -199,16 +206,16 @@ class FraudDetectionOrchestrator:
             "detection_time_p99_ms": float(np.percentile(detection_times, 99)),
             "curves": {
                 "roc": {"fpr": fpr.tolist(), "tpr": tpr.tolist()},
-                "pr": {"precision": prec_curve.tolist(), "recall": rec_curve.tolist()}
-            }
+                "pr": {"precision": prec_curve.tolist(), "recall": rec_curve.tolist()},
+            },
         }
-        
+
         return metrics
-    
+
     def get_latency_stats(self) -> Dict[str, float]:
         """Get detection latency statistics."""
         times_ms = np.array(self.detection_times) * 1000
-        
+
         return {
             "mean_ms": float(times_ms.mean()),
             "median_ms": float(np.median(times_ms)),
